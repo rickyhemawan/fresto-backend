@@ -8,53 +8,104 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-const tok = process.env.DUMMY_FCM_TOKEN;
+const orderStatus = {
+  waitingMerchantConfirmation: 'WAITING_MERCHANT_CONFIRMATION',
+  waitingPayment: 'WAITING_PAYMENT',
+  onProgress: 'ON_PROGRESS',
+  cancelled: 'CANCELLED',
+  done: 'DONE',
+};
 
 // Create and Deploy Your First Cloud Functions
 // https://firebase.google.com/docs/functions/write-firebase-functions
 
-exports.helloWorld = functions.https.onRequest((req, res) => {
-  res.send('Hello from Firebase!');
-});
+function getClientTokens(userUid) {
+  return new Promise((resolve, reject) => {
+    db.collection('clients')
+      .doc(userUid)
+      .collection('tokens')
+      .get()
+      .then((result) => resolve(result))
+      .catch((result) => reject(result));
+  });
+}
+
+function getMerchantTokens(merchantUid) {
+  return new Promise((resolve, reject) => {
+    db.collection('merchants')
+      .doc(merchantUid)
+      .collection('tokens')
+      .get()
+      .then((result) => resolve(result))
+      .catch((result) => reject(result));
+  });
+}
+
+function parseMessage(message, isClient) {
+  if (message === orderStatus.waitingMerchantConfirmation) {
+    if (isClient) return 'Reservation request sent!';
+    return 'We have a new customer!';
+  }
+  if (message === orderStatus.waitingPayment) {
+    if (isClient) return 'Reservation accepted, please pay to proceed';
+    return 'Reservation confirmed, waiting for payment';
+  }
+  if (message === orderStatus.onProgress) {
+    if (isClient) return 'Reservation paid!';
+    return 'Reservation paid!';
+  }
+  if (message === orderStatus.cancelled) return 'Reservation cancelled';
+  if (message === orderStatus.done) return 'Reservation Done, Thank You!';
+  return message;
+}
+
+function sendFCM(token, message) {
+  return new Promise((resolve, reject) => {
+    const payLoad = {
+      notification: {
+        body: 'Please check Order(s) for more information',
+        title: message,
+      },
+    };
+    admin
+      .messaging()
+      .sendToDevice(token, payLoad)
+      .then((result) => resolve(result))
+      .catch((result) => reject(result));
+  });
+}
 
 exports.listenOrderStatus = functions.firestore
-    .document('orders/{uid}')
-    .onUpdate((change, context) => {
-      // Documents
-      const previousVal = change.before.data();
-      const currentVal = change.after.data();
+  .document('orders/{uid}')
+  .onUpdate(async (change, context) => {
+    // Documents
+    const previousVal = change.before.data();
+    const currentVal = change.after.data();
+    console.log(context.params.uid);
+    // Order Statuses
+    const prevOS = previousVal.orderStatus;
+    const currOs = currentVal.orderStatus;
 
-      // Order Statuses
-      const prevOS = previousVal.orderStatus;
-      const currOs = currentVal.orderStatus;
+    if (prevOS.length === currOs.length) {
+      console.log('no order status changes');
+      return null;
+    }
+    console.log('currentVal.userUid =>', currentVal.userUid);
+    console.log('currentVal.merchantUid =>', currentVal.merchantUid);
 
-      if (prevOS.length === currOs.length) {
-        console.log('no order status changes');
-        return null;
-      };
-
-      return new Promise(async (resolve, reject) => {
-        const clientData = await db
-            .collection('clients')
-            .doc(currentVal.userUid);
-        console.log(clientData);
-        console.log('previousVal =>', previousVal);
-
-        const payLoad = {
-          notification: {
-            body: 'This is the body',
-            title: currOs[currOs.length -1],
-          },
-        };
-
-        await admin.messaging().sendToDevice(tok, payLoad)
-            .then((res) => console.log(res))
-            .catch((res) => console.log(res));
-
-        console.log('Success');
-        resolve('Success');
-      }).catch((res) => {
-        console.log(res);
-        reject(res);
-      });
+    const clientTokens = await getClientTokens(currentVal.userUid);
+    clientTokens.forEach(async (doc) => {
+      const { token } = doc.data();
+      console.log(token);
+      await sendFCM(token, parseMessage(currOs[currOs.length - 1], true));
     });
+
+    const merchantTokens = await getMerchantTokens(currentVal.merchantUid);
+    merchantTokens.forEach(async (doc) => {
+      const { token } = doc.data();
+      console.log(token);
+      await sendFCM(token, parseMessage(currOs[currOs.length - 1], true));
+    });
+
+    return null;
+  });
